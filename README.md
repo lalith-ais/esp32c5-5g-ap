@@ -235,7 +235,19 @@ I (1459) main_task: Returned from app_main()
 
 When a client connects:
 ```
-I (4123) WiFi_AP: Station joined  AID=1
+I (361349) wifi:new:<48,2>, old:<48,2>, ap:<48,2>, sta:<0,0>, prof:1, snd_ch_cfg:0x0
+I (361349) wifi:(trc)phytype:HT40-SGI, snr:54, maxRate:144, highestRateIdx:0
+W (361349) wifi:(trc)band:5G, phymode:3, highestRateIdx:0, lowestRateIdx:9, dataSchedTableSize:10
+I (361359) wifi:(trc)band:5G, rate(S-MCS7, rateIdx:0), ampdu(rate:S-MCS7, schedIdx(0, stop:8)), snr:54, ampduState:wait operational
+I (361369) wifi:ifidx:1, rssi:-45, nf:-99, phytype(0x5, HT40-SGI), phymode(0x3, 11an), max_rate:144, he:0, vht:0, ht:1
+I (361379) wifi:(ht)max.RxAMPDULenExponent:3(65535 bytes), MMSS:5(4 us)
+I (361389) wifi:station: bc:54:2f:b7:5c:a0 join, AID=1, an, 40D
+I (361449) esp_netif_lwip: DHCP server assigned IP to a client, IP is: 192.168.4.2
+I (361469) wifi:[ADDBA]TX addba request, tid:0, dialogtoken:1, bufsize:64, A-MSDU:0(not supported), policy:1(IMR), ssn:0(0x0)
+I (361469) wifi:[ADDBA]RX addba response, status:0, tid:0/tb:1(0xa1), bufsize:64, batimeout:0, txa_wnd:64
+W (361579) wifi:conn=0x4082dd4c alloc softap rx ba index=0 ba index 8
+I (361579) wifi:<ba-add>extra, idx:0, ifx:1, tid:0, TAHI:0x101a05c, TALO:0xb72f54bc, (ssn:13, win:64), CONF:0xc0000001
+
 ```
 
 ---
