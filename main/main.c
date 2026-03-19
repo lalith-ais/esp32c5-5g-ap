@@ -10,28 +10,30 @@
 #include "esp_netif.h"
 #include "driver/uart.h"
 
+#include "ble_beacon.h"
+
 #define TAG             "AP_CLI"
 
-/* ── AP defaults ──────────────────────────────────────────────────────── */
+/* ── AP config ───────────────────────────────────────────────────────── */
 #define WIFI_SSID       "ESP32C5_AP"
-#define WIFI_PASS       "yourpassword"      /* min 8 chars, "" = open */
-#define WIFI_CHANNEL    40                  /* starting channel (5GHz) */
+#define WIFI_PASS       "yourpassword"
+#define WIFI_CHANNEL    40
 #define MAX_STA_CONN    4
 
-/* ── UART (USB-Serial) ────────────────────────────────────────────────── */
-#define CLI_UART        UART_NUM_0          /* same UART as USB-serial */
+/* ── UART CLI ─────────────────────────────────────────────────────────── */
+#define CLI_UART        UART_NUM_0
 #define CLI_BAUD        115200
 #define CLI_BUF_SIZE    256
 #define CLI_TASK_STACK  4096
 
-/* ── Valid channel sets ───────────────────────────────────────────────── */
+/* ── Valid channels ───────────────────────────────────────────────────── */
 static const uint8_t CHANNELS_2G[] = {1,2,3,4,5,6,7,8,9,10,11,12,13};
 static const uint8_t CHANNELS_5G[] = {36,40,44,48,149,153,157,161};
 
 static uint8_t s_current_channel = WIFI_CHANNEL;
 
 /* ─────────────────────────────────────────────────────────────────────── */
-/*  Helpers                                                                 */
+/*  CLI helpers                                                             */
 /* ─────────────────────────────────────────────────────────────────────── */
 
 static void cli_send(const char *msg)
@@ -54,10 +56,7 @@ static const char *band_of(uint8_t ch)
 }
 
 /* ─────────────────────────────────────────────────────────────────────── */
-/*  AP restart on new channel                                               */
-/*                                                                          */
-/*  esp_wifi_set_config() alone won't move to a different channel while    */
-/*  the AP is running — we must stop, reconfigure, then start again.       */
+/*  AP channel switch                                                       */
 /* ─────────────────────────────────────────────────────────────────────── */
 
 static esp_err_t ap_set_channel(uint8_t ch)
@@ -73,16 +72,15 @@ static esp_err_t ap_set_channel(uint8_t ch)
 
     cfg.ap.channel = ch;
 
-    /* Switch auth mode when crossing band boundary */
     if (ch >= 36) {
-        cfg.ap.authmode = (strlen(WIFI_PASS) == 0)
-                          ? WIFI_AUTH_OPEN
-                          : WIFI_AUTH_WPA2_WPA3_PSK;
+        cfg.ap.authmode       = (strlen(WIFI_PASS) == 0)
+                                ? WIFI_AUTH_OPEN
+                                : WIFI_AUTH_WPA2_WPA3_PSK;
         cfg.ap.pmf_cfg.required = true;
     } else {
-        cfg.ap.authmode = (strlen(WIFI_PASS) == 0)
-                          ? WIFI_AUTH_OPEN
-                          : WIFI_AUTH_WPA2_PSK;
+        cfg.ap.authmode       = (strlen(WIFI_PASS) == 0)
+                                ? WIFI_AUTH_OPEN
+                                : WIFI_AUTH_WPA2_PSK;
         cfg.ap.pmf_cfg.required = false;
     }
 
@@ -98,25 +96,17 @@ static esp_err_t ap_set_channel(uint8_t ch)
 
 /* ─────────────────────────────────────────────────────────────────────── */
 /*  CLI command parser                                                      */
-/*                                                                          */
-/*  Commands (all terminated with \n):                                      */
-/*    ch <n>    – switch AP to channel n                                    */
-/*    status    – print current channel and band                            */
-/*    help      – list commands                                             */
 /* ─────────────────────────────────────────────────────────────────────── */
 
 static void handle_command(char *line)
 {
-    /* Strip trailing \r\n spaces */
     int len = strlen(line);
     while (len > 0 && (line[len-1] == '\r' || line[len-1] == '\n'
                         || line[len-1] == ' '))
         line[--len] = '\0';
-
     if (len == 0) return;
 
     if (strncmp(line, "ch ", 3) == 0) {
-        /* ── ch <n> ── */
         int n = atoi(line + 3);
         if (n <= 0 || n > 255) {
             cli_send("ERR: channel out of range\r\n");
@@ -124,48 +114,42 @@ static void handle_command(char *line)
         }
         uint8_t ch = (uint8_t)n;
         if (!is_valid_channel(ch)) {
-            cli_send("ERR: invalid channel. Valid: "
+            cli_send("ERR: invalid channel. "
                      "2.4GHz=1-13  5GHz=36,40,44,48,149,153,157,161\r\n");
             return;
         }
-        ESP_LOGI(TAG, "Switching AP to channel %d (%s)...", ch, band_of(ch));
+        ESP_LOGI(TAG, "Switching to channel %d (%s)", ch, band_of(ch));
         esp_err_t err = ap_set_channel(ch);
         if (err == ESP_OK) {
             char buf[64];
             snprintf(buf, sizeof(buf), "OK ch %d %s\r\n", ch, band_of(ch));
             cli_send(buf);
-            ESP_LOGI(TAG, "AP now on channel %d (%s)", ch, band_of(ch));
         } else {
             char buf[64];
             snprintf(buf, sizeof(buf), "ERR: wifi restart failed 0x%x\r\n", err);
             cli_send(buf);
-            ESP_LOGE(TAG, "Channel switch failed: %s", esp_err_to_name(err));
         }
 
     } else if (strcmp(line, "status") == 0) {
-        /* ── status ── */
         char buf[80];
-        snprintf(buf, sizeof(buf),
-                 "SSID=%s  ch=%d  band=%s\r\n",
+        snprintf(buf, sizeof(buf), "SSID=%s  ch=%d  band=%s\r\n",
                  WIFI_SSID, s_current_channel, band_of(s_current_channel));
         cli_send(buf);
 
     } else if (strcmp(line, "help") == 0) {
-        /* ── help ── */
         cli_send("Commands:\r\n"
-                 "  ch <n>   Switch AP to channel n\r\n"
+                 "  ch <n>   Switch AP channel\r\n"
                  "           2.4GHz: 1-13\r\n"
                  "           5GHz:   36 40 44 48 149 153 157 161\r\n"
-                 "  status   Show current channel and band\r\n"
-                 "  help     Show this message\r\n");
-
+                 "  status   Current channel and band\r\n"
+                 "  help     This message\r\n");
     } else {
         cli_send("ERR: unknown command. Type 'help'\r\n");
     }
 }
 
 /* ─────────────────────────────────────────────────────────────────────── */
-/*  CLI task – reads lines from UART_NUM_0 (USB-serial)                    */
+/*  CLI task                                                                */
 /* ─────────────────────────────────────────────────────────────────────── */
 
 static void cli_task(void *arg)
@@ -173,7 +157,7 @@ static void cli_task(void *arg)
     char buf[CLI_BUF_SIZE];
     int  pos = 0;
 
-    cli_send("\r\nESP32-C5 AP CLI ready. Type 'help'\r\n");
+    cli_send("\r\nESP32-C5 AP+BLE CLI ready. Type 'help'\r\n");
 
     while (1) {
         uint8_t c;
@@ -186,7 +170,7 @@ static void cli_task(void *arg)
                 handle_command(buf);
                 pos = 0;
             }
-        } else if (c == 127 || c == '\b') {   /* backspace */
+        } else if (c == 127 || c == '\b') {
             if (pos > 0) pos--;
         } else {
             if (pos < CLI_BUF_SIZE - 1)
@@ -196,7 +180,7 @@ static void cli_task(void *arg)
 }
 
 /* ─────────────────────────────────────────────────────────────────────── */
-/*  Wi-Fi event handler                                                     */
+/*  WiFi event handler                                                      */
 /* ─────────────────────────────────────────────────────────────────────── */
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -206,15 +190,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 
     if (event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t *e = event_data;
-        ESP_LOGI(TAG, "Client connected  AID=%d", e->aid);
+        ESP_LOGI(TAG, "WiFi client joined  AID=%d", e->aid);
     } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
         wifi_event_ap_stadisconnected_t *e = event_data;
-        ESP_LOGI(TAG, "Client disconnected  AID=%d", e->aid);
+        ESP_LOGI(TAG, "WiFi client left  AID=%d", e->aid);
     }
 }
 
 /* ─────────────────────────────────────────────────────────────────────── */
-/*  Wi-Fi AP init                                                           */
+/*  WiFi AP init                                                            */
 /* ─────────────────────────────────────────────────────────────────────── */
 
 static void wifi_init_softap(void)
@@ -249,12 +233,12 @@ static void wifi_init_softap(void)
     if (strlen(WIFI_PASS) == 0)
         wifi_config.ap.authmode = WIFI_AUTH_OPEN;
 
-    /* APSTA mode required for 5GHz on ESP32-C5 */
+    /* APSTA required for 5GHz on ESP32-C5 */
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "AP started  SSID=%s  ch=%d (%s)",
+    ESP_LOGI(TAG, "WiFi AP started  SSID=%s  ch=%d (%s)",
              WIFI_SSID, WIFI_CHANNEL, band_of(WIFI_CHANNEL));
 }
 
@@ -272,7 +256,6 @@ static void uart_cli_init(void)
         .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
     };
     ESP_ERROR_CHECK(uart_param_config(CLI_UART, &uart_config));
-    /* UART0 pins are fixed on ESP32-C5 – no need to call uart_set_pin */
     ESP_ERROR_CHECK(uart_driver_install(CLI_UART, CLI_BUF_SIZE * 2,
                                         CLI_BUF_SIZE * 2, 0, NULL, 0));
 }
@@ -283,6 +266,7 @@ static void uart_cli_init(void)
 
 void app_main(void)
 {
+    /* NVS – shared by both WiFi and BT drivers */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
         ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -291,8 +275,15 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+    /* 1. WiFi AP (5GHz, APSTA mode) */
     wifi_init_softap();
-    uart_cli_init();
 
+    /* 2. BLE beacon (Bluedroid, runs via GAP callbacks, no extra task) */
+    ESP_ERROR_CHECK(ble_beacon_init());
+
+    /* 3. UART CLI + task */
+    uart_cli_init();
     xTaskCreate(cli_task, "cli", CLI_TASK_STACK, NULL, 5, NULL);
+
+    ESP_LOGI(TAG, "All systems up: WiFi AP + BLE beacon + CLI");
 }
