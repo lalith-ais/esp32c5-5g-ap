@@ -29,7 +29,7 @@ void wifi_init_softap() {
             .ssid = WIFI_SSID,
             .password = WIFI_PASS,
             .ssid_len = strlen(WIFI_SSID),
-            .channel = 40,
+            .channel = 48,
             .authmode = WIFI_AUTH_WPA2_WPA3_PSK,
             .max_connection = MAX_STA_CONN,
             .pmf_cfg = {
