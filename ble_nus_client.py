@@ -164,8 +164,8 @@ async def ble_session(address: str):
 
             _ble_connected = True
             log.info("BLE connected  [%s]  MTU=%d", address, client.mtu_size)
-            await client.start_notify(NUS_TX_UUID, ble_rx_handler)
             mqtt_publish_status("ONLINE")
+            await client.start_notify(NUS_TX_UUID, ble_rx_handler)
             log.info("Listening on MQTT %s  –  ready", MQTT_SUB)
 
             while True:
