@@ -1,12 +1,12 @@
 idf_component_register(
     SRCS
         "main.c"
-        "ble_beacon.c"
+        "ble_nus.c"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES
-        esp_wifi
+        bt
         nvs_flash
         driver
-        bt
+        esp_wifi
 )
