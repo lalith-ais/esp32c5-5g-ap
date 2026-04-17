@@ -8,6 +8,7 @@ via MQTT messages on topic /VAL200/channel.
 Features:
   - Auto-reconnect if the ESP32-C5 BLE link drops (e.g. power loss)
   - MQTT status published to /VAL200/channel/status  (ONLINE / OFFLINE)
+  - BLE connection heartbeat published to /VAL200/blestatus every 30 s
   - Channel commands queued while disconnected, replayed on reconnect
   - Responses published to /VAL200/channel/response
 
@@ -37,7 +38,9 @@ MQTT_BROKER   = "192.168.99.1"
 MQTT_PORT     = 1883
 MQTT_SUB      = "/VAL200/channel"
 MQTT_PUB      = "/VAL200/channel/response"
-MQTT_STATUS   = "/VAL200/channel/status"    # ONLINE / OFFLINE
+MQTT_STATUS     = "/VAL200/channel/status"    # ONLINE / OFFLINE
+MQTT_BLE_STATUS = "/VAL200/blestatus"         # periodic BLE heartbeat
+BLE_STATUS_INTERVAL = 30                      # seconds between heartbeat publishes
 
 # ── Reconnect timing ──────────────────────────────────────────────────
 RECONNECT_DELAY_MIN = 2    # seconds before first retry
@@ -63,10 +66,12 @@ _ble_connected: bool                    = False
 # ─────────────────────────────────────────────────────────────────────
 
 def mqtt_publish_status(status: str):
-    """Publish ONLINE or OFFLINE to the status topic."""
+    """Publish ONLINE or OFFLINE to the status topic and BLE status topic."""
     if _mqtt_client and _mqtt_client.is_connected():
         _mqtt_client.publish(MQTT_STATUS, status, retain=True)
-        log.info("MQTT status → %s", status)
+        ble_status = "CONNECTED" if status == "ONLINE" else "DISCONNECTED"
+        _mqtt_client.publish(MQTT_BLE_STATUS, ble_status, retain=True)
+        log.info("MQTT status → %s  |  BLE status → %s", status, ble_status)
 
 
 def on_connect(client, userdata, flags, rc, properties=None):
@@ -145,6 +150,61 @@ async def ble_send(client: BleakClient, cmd: str):
 
 
 # ─────────────────────────────────────────────────────────────────────
+#  HCI interface check
+# ─────────────────────────────────────────────────────────────────────
+
+HCI_INTERFACE     = "hci0"
+HCI_POLL_INTERVAL = 5    # seconds between readiness checks
+HCI_POLL_MAX_WAIT = 300  # give up after this many seconds (0 = wait forever)
+
+
+async def wait_for_hci(interface: str = HCI_INTERFACE) -> None:
+    """
+    Block until *interface* exists and is UP, polling every HCI_POLL_INTERVAL
+    seconds.  Raises RuntimeError if HCI_POLL_MAX_WAIT > 0 and the interface
+    never becomes ready in time.
+    """
+    import os
+    import subprocess
+
+    log.info("Checking BLE interface %s ...", interface)
+    waited = 0
+
+    while True:
+        ready = False
+
+        # Primary check: hciconfig (bluez userspace tool)
+        try:
+            result = subprocess.run(
+                ["hciconfig", interface],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and "UP RUNNING" in result.stdout:
+                ready = True
+        except FileNotFoundError:
+            # hciconfig not installed – fall back to sysfs
+            ready = os.path.exists(f"/sys/class/bluetooth/{interface}")
+        except subprocess.TimeoutExpired:
+            log.warning("hciconfig timed out while checking %s", interface)
+
+        if ready:
+            log.info("BLE interface %s is UP – continuing", interface)
+            return
+
+        if HCI_POLL_MAX_WAIT > 0 and waited >= HCI_POLL_MAX_WAIT:
+            raise RuntimeError(
+                f"BLE interface {interface} not available after {HCI_POLL_MAX_WAIT}s"
+            )
+
+        log.warning(
+            "BLE interface %s not ready – retrying in %ds  (waited %ds so far)",
+            interface, HCI_POLL_INTERVAL, waited
+        )
+        await asyncio.sleep(HCI_POLL_INTERVAL)
+        waited += HCI_POLL_INTERVAL
+
+
+# ─────────────────────────────────────────────────────────────────────
 #  BLE session – single connect attempt, runs until link drops
 # ─────────────────────────────────────────────────────────────────────
 
@@ -204,6 +264,15 @@ async def ble_reconnect_loop(mac: str = None):
     address = mac  # None = scan each time
 
     while True:
+        # Ensure the HCI adapter is present and UP before attempting a scan
+        # or connection.  On first boot (or after a BT subsystem restart)
+        # hci0 may not be ready yet.
+        try:
+            await wait_for_hci()
+        except RuntimeError as e:
+            log.error("%s – giving up", e)
+            return
+
         # Resolve address if not fixed
         if address is None:
             resolved = await find_device()
@@ -229,6 +298,24 @@ async def ble_reconnect_loop(mac: str = None):
 
 
 # ─────────────────────────────────────────────────────────────────────
+#  Periodic BLE status heartbeat
+# ─────────────────────────────────────────────────────────────────────
+
+async def ble_status_heartbeat():
+    """
+    Publish the current BLE connection state to MQTT_BLE_STATUS every
+    BLE_STATUS_INTERVAL seconds.  Runs as a background task for the
+    lifetime of the process.
+    """
+    while True:
+        if _mqtt_client and _mqtt_client.is_connected():
+            ble_status = "CONNECTED" if _ble_connected else "DISCONNECTED"
+            _mqtt_client.publish(MQTT_BLE_STATUS, ble_status, retain=True)
+            log.debug("BLE heartbeat → %s", ble_status)
+        await asyncio.sleep(BLE_STATUS_INTERVAL)
+
+
+# ─────────────────────────────────────────────────────────────────────
 #  Main
 # ─────────────────────────────────────────────────────────────────────
 
@@ -250,10 +337,12 @@ async def run(mac: str = None):
     _mqtt_client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=60)
     _mqtt_client.loop_start()
 
-    # ── BLE reconnect loop ──────────────────────────────────────────
+    # ── BLE reconnect loop + heartbeat ─────────────────────────────
+    heartbeat = asyncio.create_task(ble_status_heartbeat())
     try:
         await ble_reconnect_loop(mac)
     finally:
+        heartbeat.cancel()
         mqtt_publish_status("OFFLINE")
         _mqtt_client.loop_stop()
         _mqtt_client.disconnect()
